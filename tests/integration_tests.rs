@@ -658,4 +658,87 @@ fn test_adhoc_start_stop_daemon_command() {
     assert!(sysd_content.contains("PIDFile=/var/run/rclone.pid"));
 }
 
+#[test]
+fn test_replace_identical_does_not_update_disk() {
+    let bin = get_binary_path();
+    let temp_dir = tempfile::tempdir().unwrap();
+
+    // Systemd test
+    let sys_dir_systemd = temp_dir.path().join("systemd_sys");
+    fs::create_dir_all(&sys_dir_systemd).unwrap();
+
+    let service_file = temp_dir.path().join("demo.service");
+    let content = "[Unit]\nDescription=Demo Service\n\n[Service]\nExecStart=/usr/bin/demo\n";
+    fs::write(&service_file, content).unwrap();
+
+    let out = Command::new(&bin)
+        .env("SERVICECTL_SKIP_SYSTEMCTL", "1")
+        .args(["add", service_file.to_str().unwrap(), "--target", "systemd", "--sys-dir", sys_dir_systemd.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    let installed_sysd = sys_dir_systemd.join("demo.service");
+    let mtime_sysd_before = fs::metadata(&installed_sysd).unwrap().modified().unwrap();
+
+    // Small delay to ensure any potential filesystem timestamp update would differ
+    std::thread::sleep(std::time::Duration::from_millis(20));
+
+    // Replace with identical content
+    let out_rep = Command::new(&bin)
+        .env("SERVICECTL_SKIP_SYSTEMCTL", "1")
+        .args(["replace", service_file.to_str().unwrap(), "--target", "systemd", "--sys-dir", sys_dir_systemd.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(out_rep.status.success());
+    let mtime_sysd_after = fs::metadata(&installed_sysd).unwrap().modified().unwrap();
+    assert_eq!(mtime_sysd_before, mtime_sysd_after);
+
+    // OpenRC test
+    let sys_dir_openrc = temp_dir.path().join("openrc_sys");
+    fs::create_dir_all(&sys_dir_openrc).unwrap();
+
+    let out_openrc = Command::new(&bin)
+        .args(["add", service_file.to_str().unwrap(), "--target", "openrc", "--sys-dir", sys_dir_openrc.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(out_openrc.status.success());
+
+    let installed_openrc = sys_dir_openrc.join("demo");
+    let mtime_openrc_before = fs::metadata(&installed_openrc).unwrap().modified().unwrap();
+
+    std::thread::sleep(std::time::Duration::from_millis(20));
+
+    let out_openrc_rep = Command::new(&bin)
+        .args(["replace", service_file.to_str().unwrap(), "--target", "openrc", "--sys-dir", sys_dir_openrc.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(out_openrc_rep.status.success());
+    let mtime_openrc_after = fs::metadata(&installed_openrc).unwrap().modified().unwrap();
+    assert_eq!(mtime_openrc_before, mtime_openrc_after);
+
+    // Procd test
+    let sys_dir_procd = temp_dir.path().join("procd_sys");
+    fs::create_dir_all(&sys_dir_procd).unwrap();
+
+    let out_procd = Command::new(&bin)
+        .args(["add", service_file.to_str().unwrap(), "--target", "procd", "--sys-dir", sys_dir_procd.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(out_procd.status.success());
+
+    let installed_procd = sys_dir_procd.join("demo");
+    let mtime_procd_before = fs::metadata(&installed_procd).unwrap().modified().unwrap();
+
+    std::thread::sleep(std::time::Duration::from_millis(20));
+
+    let out_procd_rep = Command::new(&bin)
+        .args(["replace", service_file.to_str().unwrap(), "--target", "procd", "--sys-dir", sys_dir_procd.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(out_procd_rep.status.success());
+    let mtime_procd_after = fs::metadata(&installed_procd).unwrap().modified().unwrap();
+    assert_eq!(mtime_procd_before, mtime_procd_after);
+}
+
 

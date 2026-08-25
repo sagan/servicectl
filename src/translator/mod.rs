@@ -114,6 +114,18 @@ pub fn write_file_with_mode(path: &Path, content: &str, mode: u32) -> Result<()>
     Ok(())
 }
 
+pub fn write_file_if_different(path: &Path, content: &str, mode: u32) -> Result<bool> {
+    if path.exists() {
+        if let Ok(bytes) = std::fs::read(path) {
+            if bytes == content.as_bytes() {
+                return Ok(false);
+            }
+        }
+    }
+    write_file_with_mode(path, content, mode)?;
+    Ok(true)
+}
+
 pub fn split_command(cmd: &str) -> (String, String) {
     let trimmed = cmd.trim();
     if let Some((exe, args)) = trimmed.split_once(char::is_whitespace) {
@@ -259,6 +271,30 @@ testgroup:x:1001:
             "nogroup"
         );
         assert!(resolve_group_name_from_file("9999", &group_path).is_err());
+    }
+
+    #[test]
+    fn test_write_file_if_different() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let file_path = temp_dir.path().join("test_service");
+
+        // 1. Initial write
+        let updated = write_file_if_different(&file_path, "content_v1", 0o644).unwrap();
+        assert!(updated);
+        assert_eq!(std::fs::read_to_string(&file_path).unwrap(), "content_v1");
+
+        let mtime_before = std::fs::metadata(&file_path).unwrap().modified().unwrap();
+
+        // 2. Identical write should not update disk file
+        let updated = write_file_if_different(&file_path, "content_v1", 0o644).unwrap();
+        assert!(!updated);
+        let mtime_after = std::fs::metadata(&file_path).unwrap().modified().unwrap();
+        assert_eq!(mtime_before, mtime_after);
+
+        // 3. Different content should update disk file
+        let updated = write_file_if_different(&file_path, "content_v2", 0o644).unwrap();
+        assert!(updated);
+        assert_eq!(std::fs::read_to_string(&file_path).unwrap(), "content_v2");
     }
 }
 

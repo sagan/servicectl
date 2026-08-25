@@ -2,7 +2,9 @@ use anyhow::{bail, Result};
 use std::path::PathBuf;
 
 use super::start_stop_daemon::StartStopDaemonKind;
-use super::{split_command, write_file_with_mode, InitSystem, ServiceInstaller};
+use super::{
+    split_command, write_file_if_different, write_file_with_mode, InitSystem, ServiceInstaller,
+};
 use crate::service::ServiceUnit;
 
 pub struct OpenRCInstaller {
@@ -186,7 +188,7 @@ impl ServiceInstaller for OpenRCInstaller {
         let target_path = self.target_file_path(service_name);
         let exists = target_path.exists();
         let script = Self::generate_script(service_name, unit)?;
-        write_file_with_mode(&target_path, &script, 0o755)?;
+        write_file_if_different(&target_path, &script, 0o755)?;
         if exists {
             println!(
                 "Successfully replaced OpenRC service '{}' -> {}",

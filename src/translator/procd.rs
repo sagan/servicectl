@@ -2,7 +2,8 @@ use anyhow::{bail, Result};
 use std::path::PathBuf;
 
 use super::{
-    resolve_group_name, resolve_user_name, write_file_with_mode, InitSystem, ServiceInstaller,
+    resolve_group_name, resolve_user_name, write_file_if_different, write_file_with_mode,
+    InitSystem, ServiceInstaller,
 };
 use crate::service::ServiceUnit;
 
@@ -162,7 +163,7 @@ impl ServiceInstaller for ProcdInstaller {
         let target_path = self.target_file_path(service_name);
         let exists = target_path.exists();
         let script = Self::generate_script(service_name, unit)?;
-        write_file_with_mode(&target_path, &script, 0o755)?;
+        write_file_if_different(&target_path, &script, 0o755)?;
         if exists {
             println!(
                 "Successfully replaced Procd service '{}' -> {}",

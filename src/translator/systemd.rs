@@ -2,7 +2,7 @@ use anyhow::{bail, Context, Result};
 use std::path::PathBuf;
 use std::process::Command;
 
-use super::{write_file_with_mode, InitSystem, ServiceInstaller};
+use super::{write_file_if_different, write_file_with_mode, InitSystem, ServiceInstaller};
 use crate::service::ServiceUnit;
 
 pub struct SystemdInstaller {
@@ -70,7 +70,7 @@ impl ServiceInstaller for SystemdInstaller {
     fn replace(&self, service_name: &str, _unit: &ServiceUnit, raw_content: &str) -> Result<()> {
         let target_path = self.target_file_path(service_name);
         let exists = target_path.exists();
-        write_file_with_mode(&target_path, raw_content, 0o644)?;
+        write_file_if_different(&target_path, raw_content, 0o644)?;
         if exists {
             println!(
                 "Successfully replaced systemd service '{}' -> {}",
