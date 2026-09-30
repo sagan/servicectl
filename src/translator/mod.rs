@@ -6,8 +6,58 @@ pub mod systemd;
 use anyhow::{bail, Context, Result};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use crate::service::ServiceUnit;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceAction {
+    Enable,
+    Disable,
+    Start,
+    Stop,
+    Restart,
+    Status,
+}
+
+impl ServiceAction {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ServiceAction::Enable => "enable",
+            ServiceAction::Disable => "disable",
+            ServiceAction::Start => "start",
+            ServiceAction::Stop => "stop",
+            ServiceAction::Restart => "restart",
+            ServiceAction::Status => "status",
+        }
+    }
+}
+
+pub fn is_executable_in_path(cmd: &str) -> bool {
+    if let Ok(path_var) = std::env::var("PATH") {
+        for dir in std::env::split_paths(&path_var) {
+            let full_path = dir.join(cmd);
+            if full_path.is_file() {
+                if let Ok(metadata) = std::fs::metadata(&full_path) {
+                    if metadata.permissions().mode() & 0o111 != 0 {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    for dir in ["/sbin", "/usr/sbin", "/bin", "/usr/bin"] {
+        let full_path = Path::new(dir).join(cmd);
+        if full_path.is_file() {
+            if let Ok(metadata) = std::fs::metadata(&full_path) {
+                if metadata.permissions().mode() & 0o111 != 0 {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InitSystem {
@@ -78,6 +128,77 @@ impl InitSystem {
 
         bail!("Could not automatically detect init system. Please specify --target or SERVICECTL_INIT_SYSTEM.")
     }
+
+    pub fn get_action_command(&self, action: ServiceAction, service_name: &str) -> (String, Vec<String>) {
+        let clean_name = service_name.strip_suffix(".service").unwrap_or(service_name);
+        match self {
+            InitSystem::Systemd => {
+                let bin = std::env::var("SERVICECTL_SYSTEMCTL_BIN")
+                    .unwrap_or_else(|_| "systemctl".to_string());
+                (bin, vec![action.as_str().to_string(), service_name.to_string()])
+            }
+            InitSystem::OpenRC => {
+                match action {
+                    ServiceAction::Enable => {
+                        let bin = std::env::var("SERVICECTL_RC_UPDATE_BIN")
+                            .unwrap_or_else(|_| "rc-update".to_string());
+                        (bin, vec!["add".to_string(), clean_name.to_string(), "default".to_string()])
+                    }
+                    ServiceAction::Disable => {
+                        let bin = std::env::var("SERVICECTL_RC_UPDATE_BIN")
+                            .unwrap_or_else(|_| "rc-update".to_string());
+                        (bin, vec!["del".to_string(), clean_name.to_string(), "default".to_string()])
+                    }
+                    ServiceAction::Start
+                    | ServiceAction::Stop
+                    | ServiceAction::Restart
+                    | ServiceAction::Status => {
+                        let bin = if let Ok(custom) = std::env::var("SERVICECTL_OPENRC_BIN") {
+                            custom
+                        } else if is_executable_in_path("rc-service") {
+                            "rc-service".to_string()
+                        } else if is_executable_in_path("service") {
+                            "service".to_string()
+                        } else {
+                            "rc-service".to_string()
+                        };
+                        (bin, vec![clean_name.to_string(), action.as_str().to_string()])
+                    }
+                }
+            }
+            InitSystem::Procd => {
+                let bin = std::env::var("SERVICECTL_SERVICE_BIN")
+                    .unwrap_or_else(|_| "service".to_string());
+                (bin, vec![clean_name.to_string(), action.as_str().to_string()])
+            }
+        }
+    }
+
+    pub fn execute_action(&self, action: ServiceAction, service_name: &str) -> Result<()> {
+        let (program, args) = self.get_action_command(action, service_name);
+
+        if std::env::var("SERVICECTL_DRY_RUN").is_ok() {
+            println!("{} {}", program, args.join(" "));
+            return Ok(());
+        }
+
+        let mut cmd = Command::new(&program);
+        cmd.args(&args);
+
+        let status = cmd
+            .status()
+            .with_context(|| format!("Failed to execute '{}'", program))?;
+
+        if !status.success() {
+            if let Some(code) = status.code() {
+                std::process::exit(code);
+            } else {
+                bail!("Process '{}' terminated by signal", program);
+            }
+        }
+
+        Ok(())
+    }
 }
 
 pub trait ServiceInstaller {
@@ -90,6 +211,10 @@ pub trait ServiceInstaller {
     }
     fn add(&self, service_name: &str, unit: &ServiceUnit, raw_content: &str) -> Result<()>;
     fn replace(&self, service_name: &str, unit: &ServiceUnit, raw_content: &str) -> Result<()>;
+    #[allow(dead_code)]
+    fn execute_action(&self, action: ServiceAction, service_name: &str) -> Result<()> {
+        self.init_system().execute_action(action, service_name)
+    }
 }
 
 pub fn get_installer(target: InitSystem, override_dir: Option<PathBuf>) -> Box<dyn ServiceInstaller> {
@@ -295,6 +420,80 @@ testgroup:x:1001:
         let updated = write_file_if_different(&file_path, "content_v2", 0o644).unwrap();
         assert!(updated);
         assert_eq!(std::fs::read_to_string(&file_path).unwrap(), "content_v2");
+    }
+
+    #[test]
+    fn test_systemd_action_commands() {
+        let sys = InitSystem::Systemd;
+        assert_eq!(
+            sys.get_action_command(ServiceAction::Enable, "nginx"),
+            ("systemctl".to_string(), vec!["enable".to_string(), "nginx".to_string()])
+        );
+        assert_eq!(
+            sys.get_action_command(ServiceAction::Disable, "nginx"),
+            ("systemctl".to_string(), vec!["disable".to_string(), "nginx".to_string()])
+        );
+        assert_eq!(
+            sys.get_action_command(ServiceAction::Start, "nginx"),
+            ("systemctl".to_string(), vec!["start".to_string(), "nginx".to_string()])
+        );
+        assert_eq!(
+            sys.get_action_command(ServiceAction::Stop, "nginx"),
+            ("systemctl".to_string(), vec!["stop".to_string(), "nginx".to_string()])
+        );
+        assert_eq!(
+            sys.get_action_command(ServiceAction::Restart, "nginx"),
+            ("systemctl".to_string(), vec!["restart".to_string(), "nginx".to_string()])
+        );
+        assert_eq!(
+            sys.get_action_command(ServiceAction::Status, "nginx"),
+            ("systemctl".to_string(), vec!["status".to_string(), "nginx".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_procd_action_commands() {
+        let sys = InitSystem::Procd;
+        assert_eq!(
+            sys.get_action_command(ServiceAction::Enable, "nginx.service"),
+            ("service".to_string(), vec!["nginx".to_string(), "enable".to_string()])
+        );
+        assert_eq!(
+            sys.get_action_command(ServiceAction::Disable, "nginx"),
+            ("service".to_string(), vec!["nginx".to_string(), "disable".to_string()])
+        );
+        assert_eq!(
+            sys.get_action_command(ServiceAction::Start, "nginx"),
+            ("service".to_string(), vec!["nginx".to_string(), "start".to_string()])
+        );
+        assert_eq!(
+            sys.get_action_command(ServiceAction::Stop, "nginx"),
+            ("service".to_string(), vec!["nginx".to_string(), "stop".to_string()])
+        );
+        assert_eq!(
+            sys.get_action_command(ServiceAction::Restart, "nginx"),
+            ("service".to_string(), vec!["nginx".to_string(), "restart".to_string()])
+        );
+        assert_eq!(
+            sys.get_action_command(ServiceAction::Status, "nginx.service"),
+            ("service".to_string(), vec!["nginx".to_string(), "status".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_openrc_action_commands() {
+        let sys = InitSystem::OpenRC;
+        assert_eq!(
+            sys.get_action_command(ServiceAction::Enable, "nginx.service"),
+            ("rc-update".to_string(), vec!["add".to_string(), "nginx".to_string(), "default".to_string()])
+        );
+        assert_eq!(
+            sys.get_action_command(ServiceAction::Disable, "nginx"),
+            ("rc-update".to_string(), vec!["del".to_string(), "nginx".to_string(), "default".to_string()])
+        );
+        let (prog, args) = sys.get_action_command(ServiceAction::Status, "nginx");
+        assert!(prog == "rc-service" || prog == "service");
+        assert_eq!(args, vec!["nginx".to_string(), "status".to_string()]);
     }
 }
 

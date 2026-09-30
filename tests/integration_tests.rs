@@ -741,4 +741,169 @@ fn test_replace_identical_does_not_update_disk() {
     assert_eq!(mtime_procd_before, mtime_procd_after);
 }
 
+#[test]
+fn test_systemd_action_subcommands() {
+    let bin = get_binary_path();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let bin_dir = temp_dir.path().join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+
+    let log_file = temp_dir.path().join("systemctl.log");
+    let mock_systemctl = bin_dir.join("systemctl");
+    let script = format!(
+        "#!/bin/sh\necho \"$@\" >> \"{}\"\n",
+        log_file.display()
+    );
+    fs::write(&mock_systemctl, script).unwrap();
+    fs::set_permissions(&mock_systemctl, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let path_env = format!("{}:{}", bin_dir.display(), std::env::var("PATH").unwrap_or_default());
+
+    let actions = ["enable", "disable", "start", "stop", "restart", "status"];
+    for action in actions {
+        let output = Command::new(&bin)
+            .env("PATH", &path_env)
+            .args(["--target", "systemd", action, "testsvc"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "Failed on action {}: stderr: {}", action, String::from_utf8_lossy(&output.stderr));
+    }
+
+    let logs = fs::read_to_string(&log_file).unwrap();
+    let lines: Vec<&str> = logs.lines().collect();
+    assert_eq!(lines.len(), 6);
+    assert_eq!(lines[0], "enable testsvc");
+    assert_eq!(lines[1], "disable testsvc");
+    assert_eq!(lines[2], "start testsvc");
+    assert_eq!(lines[3], "stop testsvc");
+    assert_eq!(lines[4], "restart testsvc");
+    assert_eq!(lines[5], "status testsvc");
+}
+
+#[test]
+fn test_procd_action_subcommands() {
+    let bin = get_binary_path();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let bin_dir = temp_dir.path().join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+
+    let log_file = temp_dir.path().join("service.log");
+    let mock_service = bin_dir.join("service");
+    let script = format!(
+        "#!/bin/sh\necho \"$@\" >> \"{}\"\n",
+        log_file.display()
+    );
+    fs::write(&mock_service, script).unwrap();
+    fs::set_permissions(&mock_service, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let path_env = format!("{}:{}", bin_dir.display(), std::env::var("PATH").unwrap_or_default());
+
+    let actions = ["enable", "disable", "start", "stop", "restart", "status"];
+    for action in actions {
+        let output = Command::new(&bin)
+            .env("PATH", &path_env)
+            .args(["--target", "procd", action, "mysvc.service"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "Failed on action {}: stderr: {}", action, String::from_utf8_lossy(&output.stderr));
+    }
+
+    let logs = fs::read_to_string(&log_file).unwrap();
+    let lines: Vec<&str> = logs.lines().collect();
+    assert_eq!(lines.len(), 6);
+    assert_eq!(lines[0], "mysvc enable");
+    assert_eq!(lines[1], "mysvc disable");
+    assert_eq!(lines[2], "mysvc start");
+    assert_eq!(lines[3], "mysvc stop");
+    assert_eq!(lines[4], "mysvc restart");
+    assert_eq!(lines[5], "mysvc status");
+}
+
+#[test]
+fn test_openrc_action_subcommands() {
+    let bin = get_binary_path();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let bin_dir = temp_dir.path().join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+
+    let update_log = temp_dir.path().join("rc_update.log");
+    let mock_rc_update = bin_dir.join("rc-update");
+    let update_script = format!(
+        "#!/bin/sh\necho \"$@\" >> \"{}\"\n",
+        update_log.display()
+    );
+    fs::write(&mock_rc_update, update_script).unwrap();
+    fs::set_permissions(&mock_rc_update, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let service_log = temp_dir.path().join("rc_service.log");
+    let mock_rc_service = bin_dir.join("rc-service");
+    let service_script = format!(
+        "#!/bin/sh\necho \"$@\" >> \"{}\"\n",
+        service_log.display()
+    );
+    fs::write(&mock_rc_service, service_script).unwrap();
+    fs::set_permissions(&mock_rc_service, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let path_env = format!("{}:{}", bin_dir.display(), std::env::var("PATH").unwrap_or_default());
+
+    // 1. Enable & Disable
+    let out_enable = Command::new(&bin)
+        .env("PATH", &path_env)
+        .args(["--target", "openrc", "enable", "app.service"])
+        .output()
+        .unwrap();
+    assert!(out_enable.status.success());
+
+    let out_disable = Command::new(&bin)
+        .env("PATH", &path_env)
+        .args(["--target", "openrc", "disable", "app.service"])
+        .output()
+        .unwrap();
+    assert!(out_disable.status.success());
+
+    let update_content = fs::read_to_string(&update_log).unwrap();
+    let update_lines: Vec<&str> = update_content.lines().collect();
+    assert_eq!(update_lines, vec!["add app default", "del app default"]);
+
+    // 2. Start, Stop, Restart, Status
+    for action in ["start", "stop", "restart", "status"] {
+        let out = Command::new(&bin)
+            .env("PATH", &path_env)
+            .args(["--target", "openrc", action, "app.service"])
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+    }
+
+    let service_content = fs::read_to_string(&service_log).unwrap();
+    let service_lines: Vec<&str> = service_content.lines().collect();
+    assert_eq!(service_lines, vec!["app start", "app stop", "app restart", "app status"]);
+}
+
+#[test]
+fn test_dry_run_output() {
+    let bin = get_binary_path();
+
+    let out = Command::new(&bin)
+        .env("SERVICECTL_DRY_RUN", "1")
+        .args(["--target", "systemd", "status", "nginx"])
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "systemctl status nginx");
+
+    let out = Command::new(&bin)
+        .env("SERVICECTL_DRY_RUN", "1")
+        .args(["--target", "procd", "status", "nginx"])
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "service nginx status");
+
+    let out = Command::new(&bin)
+        .env("SERVICECTL_DRY_RUN", "1")
+        .args(["--target", "openrc", "enable", "nginx"])
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "rc-update add nginx default");
+}
+
 
